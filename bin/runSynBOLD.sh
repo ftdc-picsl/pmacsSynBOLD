@@ -1,7 +1,7 @@
 #!/bin/bash -e
 
 module load singularity/3.8.3
-module load c3d/1.1.0
+module load fsl/6.0.3
 
 cleanup=1
 fsLicense="/appl/freesurfer-7.1.1/license.txt"
@@ -186,7 +186,7 @@ userArgs="$*"
 
 
 if [[ -f $inputT1wMask ]]; then
-  c3d $inputT1w $inputT1wMask -multiply -o ${jobInputDir}/T1.nii.gz
+  fslmaths $inputT1w -mas $inputT1wMask ${jobInputDir}/T1.nii.gz
   userArgs="$userArgs --skull_stripped"
 else
   cp $inputT1w ${jobInputDir}/T1.nii.gz
