@@ -1,6 +1,7 @@
 #!/bin/bash -e
 
 module load singularity/3.8.3
+module load c3d/1.1.0
 
 cleanup=1
 fsLicense="/appl/freesurfer-7.1.1/license.txt"
@@ -8,7 +9,7 @@ fsLicense="/appl/freesurfer-7.1.1/license.txt"
 function usage() {
   echo "Usage:
   $0 [-h] [-B src:dest,...,src:dest] [-c 1/0] \\
-    -v synBOLDVersion -i /path/to/input -o /path/to/output -- [extra args]
+    -v synBOLDVersion -t /path/to/T1.nii.gz -b /path/to/bold.nii.gz -o /path/to/output_dir [options] -- [extra args]
 "
 }
 
@@ -28,10 +29,11 @@ arg are:
 
 Required args:
 
-  -i /path/to/input
-     Input directory on the local file system. Will be bound to /INPUTS inside the container. This must contain
-     T1.nii.gz, b0.nii.gz, acqparams.txt. It may also contain a brain mask called T1_mask.nii.gz, but this is
-     not required.
+  -t /path/to/inputT1w.nii.gz
+     Input T1w on the local file system.
+
+  -b /path/to/inputBOLD.nii.gz
+     Input BOLD on the local file system.
 
   -o /path/to/outputDir
      Output directory on the local files system. Will be bound to /OUTPUTS inside the container.
@@ -54,6 +56,10 @@ Options:
   -h
      Prints this help message.
 
+  -m
+     Brain mask in the T1w space. If not provided, the script will run brain extraction using FSL's BET, or
+     you can pass a skull-stripped T1w by adding the appropriate flag (see below). Note that if you pass a mask
+     with this option, you do not need to add the "--skull_stripped" flag.
 
 *** Hard-coded configuration ***
 
@@ -115,13 +121,16 @@ repoDir=${scriptDir%/bin}
 userBindPoints=""
 containerVersion=""
 
-while getopts "B:c:f:i:m:o:t:v:h" opt; do
+while getopts "B:b:c:f:m:o:t:v:h" opt; do
   case $opt in
     B) userBindPoints=$OPTARG;;
+    b) inputBOLD=$OPTARG;;
     c) cleanup=$OPTARG;;
     h) help; exit 1;;
     i) inputDir=$OPTARG;;
+    m) inputT1wMask=$OPTARG;;
     o) outputDir=$OPTARG;;
+    t) inputT1w=$OPTARG;;
     v) containerVersion=$OPTARG;;
     \?) echo "Unknown option $OPTARG"; exit 2;;
     :) echo "Option $OPTARG requires an argument"; exit 2;;
@@ -145,20 +154,6 @@ fi
 sngl=$( which singularity ) ||
     ( echo "Cannot find singularity executable. Try module load singularity"; exit 1 )
 
-if [[ ! -d "$inputDir" ]]; then
-  echo "Cannot find input directory $inputDir"
-  exit 1
-fi
-
-requiredInputs=("T1.nii.gz" "BOLD_d.nii.gz")
-
-for input in ${requiredInputs[@]}; do
-  if [[ ! -f "${inputDir}/${input}" ]]; then
-    echo "Cannot find required input ${inputDir}/${input}"
-    exit 1
-  fi
-done
-
 if [[ ! -d "${outputDir}" ]]; then
   mkdir -p "$outputDir"
 fi
@@ -169,11 +164,16 @@ if [[ ! -d "${outputDir}" ]]; then
 fi
 
 # Set a job-specific temp dir
-jobTmpDir=$( mktemp -d -p ${SINGULARITY_TMPDIR} synb0.${LSB_JOBID}.XXXXXXXX.tmpdir ) ||
+jobTmpDir=$( mktemp -d -p ${SINGULARITY_TMPDIR} synbold.${LSB_JOBID}.XXXXXXXX.tmpdir ) ||
     ( echo "Could not create job temp dir ${jobTmpDir}"; exit 1 )
 
+# Because the container requires inputs mounted to a specific place, make a separate
+# directory for inputs
+jobInputDir=$( mktemp -d -p ${SINGULARITY_TMPDIR} synbold.${LSB_JOBID}.XXXXXXXX.inputdir ) ||
+    ( echo "Could not create job temp input dir ${jobInputDir}"; exit 1 )
+
 # Not all software uses TMPDIR
-# module DEV/singularity sets SINGULARITYENV_TMPDIR=/scratch
+# module singularity sets SINGULARITYENV_TMPDIR=/scratch
 # We will make a temp dir there and bind to /tmp in the container
 export SINGULARITYENV_TMPDIR="/tmp"
 
@@ -181,19 +181,40 @@ export SINGULARITYENV_TMPDIR="/tmp"
 export SINGULARITYENV_ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS=${LSB_DJOB_NUMPROC}
 export SINGULARITYENV_OMP_NUMTHREADS=${LSB_DJOB_NUMPROC}
 
+# User args
+userArgs="$*"
+
+
+if [[ -f $inputT1wMask ]]; then
+  c3d $inputT1w $inputT1wMask -multiply -o ${jobInputDir}/T1.nii.gz
+  userArgs="$userArgs --skull_stripped"
+else
+  cp $inputT1w ${jobInputDir}/T1.nii.gz
+fi
+
+cp $inputBOLD ${jobInputDir}/BOLD_d.nii.gz
+
+requiredInputs=("T1.nii.gz" "BOLD_d.nii.gz")
+
+for input in ${requiredInputs[@]}; do
+  if [[ ! -f "${jobInputDir}/${input}" ]]; then
+    echo "Cannot find required input ${jobInputDir}/${input}"
+    exit 1
+  fi
+done
+
+
 # singularity args
 singularityArgs="--cleanenv --no-home \
   -B ${jobTmpDir}:/tmp \
   -B ${fsLicense}:/extra/freesurfer/license.txt \
-  -B ${inputDir}:/INPUTS \
+  -B ${jobInputDir}:/INPUTS \
   -B ${outputDir}:/OUTPUTS"
 
 if [[ -n "$userBindPoints" ]]; then
   singularityArgs="$singularityArgs \
   -B $userBindPoints"
 fi
-
-userArgs="$*"
 
 echo "
 --- args passed through to container ---
@@ -203,8 +224,10 @@ $*
 
 echo "
 --- Script options ---
-synb0 image            : $image
-Input directory        : $inputDir
+synbold image          : $image
+input T1w              : $inputT1w
+input BOLD             : $inputBOLD
+input T1w mask         : $inputT1wMask
 Output directory       : $outputDir
 Cleanup temp           : $cleanup
 User bind points       : $userBindPoints
@@ -236,10 +259,10 @@ if [[ $singExit -eq 0 ]]; then
 fi
 
 if [[ $cleanup -eq 1 ]]; then
-  echo "Removing temp dir ${jobTmpDir}"
-  rm -rf ${jobTmpDir}
+  echo "Removing temp dirs ${jobTmpDir} ${jobInputDir}"
+  rm -rf ${jobTmpDir} ${jobInputDir}
 else
-  echo "Leaving temp dir ${jobTmpDir}"
+  echo "Leaving temp dirs ${jobTmpDir} ${jobInputDir}"
 fi
 
 exit $singExit
