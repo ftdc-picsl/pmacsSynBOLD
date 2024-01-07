@@ -20,6 +20,8 @@ def _filter_pybids_none_any(dct):
 
 def get_bids_filters(value):
     from bids.layout import Query
+    from json import loads
+    from pathlib import Path
 
     if value and Path(value).exists():
         try:
