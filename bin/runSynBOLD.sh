@@ -207,7 +207,7 @@ done
 # singularity args
 singularityArgs="--cleanenv --no-home \
   -B ${jobTmpDir}:/tmp \
-  -B ${fsLicense}:/extra/freesurfer/license.txt \
+  -B ${fsLicense}:/opt/freesurfer/license.txt \
   -B ${jobInputDir}:/INPUTS \
   -B ${outputDir}:/OUTPUTS"
 
