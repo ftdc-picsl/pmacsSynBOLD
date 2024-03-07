@@ -119,8 +119,10 @@ script will exit. Use a filter or the --t1w-image-suffix option to select a spec
 
  * Data must be organized as sub-<participant_label>/ses-<session_label>.
 
- * Axial scans are assumed, so that the phase encoding axis is AP (j, or j-) or LR (i or -i).
-   Coronal scans should work if the PE is along RL or LR, but this is untested.
+ * Axial scans are assumed, phase encoding axis must be AP (j-) or PA (j).
+
+ * By default, images are grouped by task. So task-rest and task-somethingelse will have their own field map.
+   But there is no provision to group by other entities like run, acq, etc. This can be done with a BIDS filter.
 
 
 Requires: FSL, singularity
@@ -149,6 +151,8 @@ optional.add_argument("--bold-input-4d", help="Use the entire 4D time series as 
                       "synBOLD motion-correct the data before defining an average volume as a reference image",
                       action='store_true')
 optional.add_argument("--no-smooth", help="Do not smooth the distorted reference image before running topup",
+                      action='store_true')
+optional.add_argument("--direct-field-mapping", help="Use direct field mapping instead of producing EPI image pairs",
                       action='store_true')
 optional.add_argument("--t1w-image-suffix", help="Use a specific T1w head image suffix. Eg, 'acq-mprage_T1w.nii.gz' selects "
                       "sub-participant/ses-session/sub-participant_ses-session_acq-mprage_T1w.nii.gz'. "
@@ -253,6 +257,9 @@ for group in bold_groups:
                     pe_direction_consistent = False
             else:
                 pe_direction = sidecar['PhaseEncodingDirection']
+                if pe_direction not in ['j', 'j-']:
+                    print(f"Phase encoding direction {pe_direction} in {group} not supported by synBOLD. Skipping group")
+                    continue
 
     if not pe_direction_consistent:
         print("Phase encoding direction not consistent for group " + group + ". Skipping group")
@@ -265,24 +272,17 @@ for group in bold_groups:
     bold_ref = group_bold_images[0]
 
     # Get total readout time from the first image or use command line alternative (needed for older DICOM files)
-    total_readout_time = args.total_readout_time
+    bold_ref_total_readout_time = args.total_readout_time
+    bold_ref_effective_echo_spacing = 0.0
     bold_ref_sidecar_file = bold_ref.path.replace('.nii.gz', '.json')
-
-    # True if we need to add total readout time to the sidecar for all bold images in the group
-    # Without this, qsiprep won't be able to run SDC
-    # Usually only for older data where the total readout time isn't in the sidecar
-    bold_needs_total_readout_time = False
-
-    # synBOLD requires AP or PA phase encoding
 
     with open(bold_ref_sidecar_file) as sidecar_fh:
         sidecar = json.load(sidecar_fh)
         try:
-            total_readout_time = sidecar['TotalReadoutTime']
+            bold_ref_total_readout_time = sidecar['TotalReadoutTime']
         except KeyError:
-            bold_needs_total_readout_time = True
             print("No total readout time in sidecar for " + bold_ref.path)
-            if total_readout_time is None:
+            if bold_ref_total_readout_time is None:
                 print("No total readout time in sidecar and no readout time specified on command line")
                 sys.exit(1)
         try:
@@ -293,18 +293,10 @@ for group in bold_groups:
         except KeyError:
             print("No phase encoding direction in sidecar for " + bold_ref.path)
             sys.exit(1)
-
-    if bold_needs_total_readout_time:
-        for bold_image in group_bold_images:
-            sidecar_file = bold_ref.path.replace('.nii.gz', '.json')
-            print("Inserting total readout time from command line: " + total_readout_time)
-            with open(sidecar_file) as sidecar_fh:
-                sidecar = json.load(sidecar_fh)
-                sidecar['TotalReadoutTime'] = total_readout_time
-            with open(sidecar_file, 'w') as sidecar_fh:
-                json.dump(sidecar, sidecar_fh, indent=2, sort_keys=True)
-
-
+        try:
+            bold_ref_effective_echo_spacing = sidecar['EffectiveEchoSpacing']
+        except KeyError:
+            print("WARNING: No effective echo spacing in sidecar for " + bold_ref.path)
 
     synBOLD_env = os.environ.copy()
     synBOLD_env['SINGULARITYENV_TMPDIR'] = '/tmp'
@@ -353,7 +345,7 @@ for group in bold_groups:
                         '-B', f"{os.path.realpath(tmp_output_dir)}:/OUTPUTS",
                         '-B', f"{os.path.realpath(tmp_singularity_dir)}:/tmp",
                         '-B', f"{os.path.realpath(args.fs_license_file)}:/opt/freesurfer/license.txt",
-                        args.container, '--total_readout_time', str(total_readout_time)]
+                        args.container, '--total_readout_time', str(bold_ref_total_readout_time)]
 
     if t1w_is_skull_stripped:
         synBOLD_cmd_list.append('--skull_stripped')
@@ -361,54 +353,111 @@ for group in bold_groups:
     if args.no_smooth:
         synBOLD_cmd_list.append('--no_smoothing')
 
+    if not args.direct_field_mapping:
+        synBOLD_cmd_list.append('--no_topup')
+
     print("---synBOLD call---\n" + " ".join(synBOLD_cmd_list) + "\n---")
 
     subprocess.run(synBOLD_cmd_list, env=synBOLD_env)
-
-    fmap_file_name = None
-    magnitude_file_name = None
-
-    if group == 'combined':
-        fmap_file_name = f"sub-{args.participant_label}_ses-{args.session_label}_acq-synBOLD_fieldmap.nii.gz"
-    else:
-        fmap_file_name = f"sub-{args.participant_label}_ses-{args.session_label}_acq-synBOLD_{group}_fieldmap.nii.gz"
-
-    magnitude_file_name = fmap_file_name.replace('fieldmap', 'magnitude')
 
     # output_dir is fmap/ under the session directory in the dataset
     output_dir = os.path.join(args.bids_dataset, f"sub-{args.participant_label}", f"ses-{args.session_label}", 'fmap')
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
-    shutil.copy(os.path.join(tmp_output_dir, 'BOLD_u_3D.nii.gz'), os.path.join(output_dir, magnitude_file_name))
-    shutil.copy(os.path.join(tmp_output_dir, 'topup_results_field.nii.gz'), os.path.join(output_dir, fmap_file_name))
+    if args.direct_field_mapping:
 
-    magnitude_sidecar_file = magnitude_file_name.replace('.nii.gz', '.json')
+        fmap_file_name = None
+        magnitude_file_name = None
 
-    fmap_sidecar_file = fmap_file_name.replace('.nii.gz', '.json')
+        if group == 'combined':
+            fmap_file_name = f"sub-{args.participant_label}_ses-{args.session_label}_acq-synBOLD_fieldmap.nii.gz"
+        else:
+            fmap_file_name = f"sub-{args.participant_label}_ses-{args.session_label}_acq-synBOLD_{group}_fieldmap.nii.gz"
 
-    # Set magnitude sidecar, fmap file is the same but with added field for units
+        magnitude_file_name = fmap_file_name.replace('fieldmap', 'magnitude')
 
-    magnitude_sidecar = {
-        "EffectiveEchoSpacing": 0.0,
-        "Modality": "MR",
-        "SeriesDescription": "synBOLD magnitude image",
-        "TotalReadoutTime": 0.0000001
-    }
+        shutil.copy(os.path.join(tmp_output_dir, 'BOLD_u_3D.nii.gz'), os.path.join(output_dir, magnitude_file_name))
+        shutil.copy(os.path.join(tmp_output_dir, 'topup_results_field.nii.gz'), os.path.join(output_dir, fmap_file_name))
 
-    with open(os.path.join(output_dir, magnitude_sidecar_file), 'w') as magnitude_sidecar_fh:
-        json.dump(magnitude_sidecar, magnitude_sidecar_fh, indent=2, sort_keys=True)
+        magnitude_sidecar_file = magnitude_file_name.replace('.nii.gz', '.json')
 
-    # Set fmap sidecar
-    fmap_sidecar = {
-        "Modality": "MR",
-        "SeriesDescription": "synBOLD fieldmap",
-        "Units": "Hz"
-    }
+        fmap_sidecar_file = fmap_file_name.replace('.nii.gz', '.json')
 
-    fmap_sidecar['IntendedFor'] = [os.path.join(f"ses-{args.session_label}", 'func', file.filename)
-                                   for file in group_bold_images]
+        # Set magnitude sidecar
 
-    with open(os.path.join(output_dir, fmap_sidecar_file), 'w') as fmap_sidecar_fh:
-        json.dump(fmap_sidecar, fmap_sidecar_fh, indent=2, sort_keys=True)
+        magnitude_sidecar = {
+            "EffectiveEchoSpacing": 0.0,
+            "Modality": "MR",
+            "SeriesDescription": "synBOLD magnitude image",
+            "TotalReadoutTime": 0.0000001
+        }
+
+        with open(os.path.join(output_dir, magnitude_sidecar_file), 'w') as magnitude_sidecar_fh:
+            json.dump(magnitude_sidecar, magnitude_sidecar_fh, indent=2, sort_keys=True)
+
+        # Set fmap sidecar
+        fmap_sidecar = {
+            "Modality": "MR",
+            "SeriesDescription": "synBOLD fieldmap",
+            "Units": "Hz"
+        }
+
+        fmap_sidecar['IntendedFor'] = [os.path.join(f"ses-{args.session_label}", 'func', file.filename)
+                                    for file in group_bold_images]
+
+        with open(os.path.join(output_dir, fmap_sidecar_file), 'w') as fmap_sidecar_fh:
+            json.dump(fmap_sidecar, fmap_sidecar_fh, indent=2, sort_keys=True)
+
+    else:
+        # Copy the distorted and undistorted 3D images to the fmap directory
+        if pe_direction == 'j':
+            bold_pe_label = 'PA'
+            rpe_label = 'AP'
+            rpe_direction = 'j-'
+        if pe_direction == 'j-':
+            bold_pe_label = 'AP'
+            rpe_label = 'PA'
+            rpe_direction = 'j'
+        if group == 'combined':
+            epi_bold_file_name = \
+                f"sub-{args.participant_label}_ses-{args.session_label}_acq-synBOLD_dir-{bold_pe_label}_epi.nii.gz"
+            rpe_bold_file_name = \
+                f"sub-{args.participant_label}_ses-{args.session_label}_acq-synBOLD_dir-{rpe_label}_epi.nii.gz"
+        else:
+            epi_bold_file_name = \
+                f"sub-{args.participant_label}_ses-{args.session_label}_acq-synBOLD_{group}_dir-{bold_pe_label}_epi.nii.gz"
+            rpe_bold_file_name = \
+                f"sub-{args.participant_label}_ses-{args.session_label}_acq-synBOLD_{group}_dir-{rpe_label}_epi.nii.gz"
+
+        shutil.copy(os.path.join(tmp_output_dir, 'BOLD_d_3D_smoothed.nii.gz'), os.path.join(output_dir, epi_bold_file_name))
+        shutil.copy(os.path.join(tmp_output_dir, 'BOLD_s_3D.nii.gz'), os.path.join(output_dir, rpe_bold_file_name))
+
+        epi_bold_sidecar_file = epi_bold_file_name.replace('.nii.gz', '.json')
+
+        epi_bold_sidecar = {
+            "EffectiveEchoSpacing": bold_ref_effective_echo_spacing,
+            "Modality": "MR",
+            "PhaseEncodingDirection": pe_direction,
+            "SeriesDescription": "synBOLD distorted image",
+            "TotalReadoutTime": bold_ref_total_readout_time
+        }
+
+        with open(os.path.join(output_dir, epi_bold_sidecar_file), 'w') as epi_sidecar_fh:
+            json.dump(epi_bold_sidecar, epi_sidecar_fh, indent=2, sort_keys=True)
+
+        rpe_bold_sidecar_file = rpe_bold_file_name.replace('.nii.gz', '.json')
+
+        rpe_bold_sidecar = {
+            "EffectiveEchoSpacing": 0.0,
+            "Modality": "MR",
+            "PhaseEncodingDirection": rpe_direction,
+            "SeriesDescription": "synBOLD undistorted image",
+            "TotalReadoutTime": 0.0000001
+        }
+
+        with open(os.path.join(output_dir, rpe_bold_sidecar_file), 'w') as rpe_sidecar_fh:
+            json.dump(rpe_bold_sidecar, rpe_sidecar_fh, indent=2, sort_keys=True)
+
+
 

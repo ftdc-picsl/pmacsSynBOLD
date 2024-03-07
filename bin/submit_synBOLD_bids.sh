@@ -13,7 +13,7 @@ repoDir=${scriptDir%/bin}
 
 function usage() {
   echo "Usage:
-  $0 -v synb0_version -L logdir [-n num_cores=1] -- [options to bidsSynB0.py]
+  $0 -i bids_dataset -v synb0_version [-n num_cores=1] -- [options to bidsSynB0.py]
 
   $0 -h for help
   "
@@ -35,6 +35,7 @@ cat << HELP
      -c / --container (set by -v option to this wrapper)
      -n / --num-threads (set by -n option to this wrapper)
      --fs-license-file (hard-coded to ${fsLicense})
+     --bids-dataset (set by -i option to this wrapper)
 
   `conda run -p /project/ftdc_pipeline/ftdc-picsl/miniconda/envs/ftdc-picsl-cp311 ${repoDir}/scripts/bidsSynBOLD.py -h`
 
@@ -44,9 +45,9 @@ HELP
 
 numThreads=1
 
-while getopts "L:n:v:h" opt; do
+while getopts "i:n:v:h" opt; do
   case $opt in
-    L) logDir=$OPTARG;;
+    i) bidsDir=$OPTARG;;
     n) numThreads=$OPTARG;;
     v) synBOLDVersion=$OPTARG;;
     h) help; exit 1;;
@@ -63,10 +64,7 @@ date=`date +%Y%m%d`
 # and errors in order
 export PYTHONUNBUFFERED=1
 
-if [[ -z ${logDir} ]]; then
-    echo "Please specify a log directory with -L"
-    exit 1
-fi
+logDir=${bidsDir}/code/logs
 
 if [[ ! -d ${logDir} ]]; then
     mkdir -p ${logDir}
@@ -77,4 +75,5 @@ bsub -n $numThreads -cwd . -o "${logDir}/synBOLD_${date}_%J.txt" \
       --container ${repoDir}/containers/synbold-disco-${synBOLDVersion}.sif \
       --num-threads $numThreads \
       --fs-license-file ${fsLicense} \
+      --bids-dataset ${bidsDir} \
       $*
