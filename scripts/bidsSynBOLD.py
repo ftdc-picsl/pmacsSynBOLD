@@ -437,10 +437,13 @@ for group in bold_groups:
         shutil.copy(os.path.join(tmp_output_dir, 'BOLD_d_3D_smoothed.nii.gz'), os.path.join(output_dir, epi_bold_file_name))
         shutil.copy(os.path.join(tmp_output_dir, 'BOLD_s_3D.nii.gz'), os.path.join(output_dir, rpe_bold_file_name))
 
+        intended = [os.path.join(f"ses-{args.session_label}", 'func', file.filename) for file in group_bold_images]
+
         epi_bold_sidecar_file = epi_bold_file_name.replace('.nii.gz', '.json')
 
         epi_bold_sidecar = {
             "EffectiveEchoSpacing": bold_ref_effective_echo_spacing,
+            "IntendedFor": intended,
             "Modality": "MR",
             "PhaseEncodingDirection": pe_direction,
             "SeriesDescription": "synBOLD distorted image",
@@ -454,6 +457,7 @@ for group in bold_groups:
 
         rpe_bold_sidecar = {
             "EffectiveEchoSpacing": 0.0,
+            "IntendedFor": intended,
             "Modality": "MR",
             "PhaseEncodingDirection": rpe_direction,
             "SeriesDescription": "synBOLD undistorted image",
